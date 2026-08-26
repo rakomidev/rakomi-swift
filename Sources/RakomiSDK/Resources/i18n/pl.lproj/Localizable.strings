@@ -1,0 +1,11 @@
+"signIn.email.label" = "Email";
+"signIn.password.label" = "Hasło";
+"signIn.submit" = "Zaloguj się";
+"signIn.totp.label" = "Kod 6-cyfrowy";
+"signIn.totp.submit" = "Weryfikuj";
+"signIn.social.continueWith" = "Kontynuuj przez %@";
+"error.network" = "Błąd sieci. Spróbuj ponownie.";
+"error.invalidCredentials" = "Nieprawidłowy email lub hasło.";
+"error.rateLimited" = "Zbyt wiele prób. Spróbuj za chwilę.";
+"error.biometricCancelled" = "Anulowano monit biometryczny.";
+"error.mfaRequired" = "Wymagane uwierzytelnianie dwuskładnikowe.";

@@ -1,0 +1,11 @@
+"signIn.email.label" = "Email";
+"signIn.password.label" = "Password";
+"signIn.submit" = "Sign in";
+"signIn.totp.label" = "6-digit code";
+"signIn.totp.submit" = "Verify";
+"signIn.social.continueWith" = "Continue with %@";
+"error.network" = "Network error. Please try again.";
+"error.invalidCredentials" = "Invalid email or password.";
+"error.rateLimited" = "Too many attempts. Please wait and try again.";
+"error.biometricCancelled" = "Biometric prompt was cancelled.";
+"error.mfaRequired" = "Two-factor authentication required.";

@@ -1,0 +1,101 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:rakomi-swift-sdk-0.1.0-2026-04-27",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-04-27T00:00:00Z",
+    "authors": [{ "name": "CRE8EVE Sp. z o.o." }],
+    "properties": [
+      {
+        "name": "rakomi:authoring",
+        "value": "MANUALLY MAINTAINED — there is NO generator for this file. Edit it by hand and re-read this note before doing so."
+      },
+      {
+        "name": "rakomi:authoring-note",
+        "value": "MANUALLY MAINTAINED — there is no generator for this file. Edit it by hand."
+      },
+      {
+        "name": "rakomi:version-caveat",
+        "value": "0.1.0 is the first public release version; the release tag on this repository is the bare SemVer `0.1.0`."
+      }
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "rakomi-swift@0.1.0",
+      "name": "RakomiSDK",
+      "version": "0.1.0",
+      "description": "Native Swift SDK for Rakomi authentication on Apple platforms (iOS, macOS, watchOS, tvOS, visionOS).",
+      "licenses": [{ "license": { "id": "MIT" } }],
+      "purl": "pkg:swift/rakomidev/rakomi-swift@0.1.0",
+      "supplier": { "name": "CRE8EVE Sp. z o.o." }
+    }
+  },
+  "components": [
+    {
+      "type": "framework",
+      "bom-ref": "swift-toolchain@5.10",
+      "name": "swift",
+      "version": "5.10",
+      "description": "Swift toolchain (declared minimum)."
+    },
+    {
+      "type": "framework",
+      "bom-ref": "apple-ios@16.0",
+      "name": "iOS SDK",
+      "version": "16.0",
+      "description": "Minimum iOS deployment target."
+    },
+    {
+      "type": "framework",
+      "bom-ref": "apple-macos@13.0",
+      "name": "macOS SDK",
+      "version": "13.0"
+    },
+    {
+      "type": "framework",
+      "bom-ref": "apple-watchos@9.0",
+      "name": "watchOS SDK",
+      "version": "9.0"
+    },
+    {
+      "type": "framework",
+      "bom-ref": "apple-tvos@16.0",
+      "name": "tvOS SDK",
+      "version": "16.0"
+    },
+    {
+      "type": "framework",
+      "bom-ref": "apple-visionos@1.0",
+      "name": "visionOS SDK",
+      "version": "1.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "swift-snapshot-testing@1.17.0",
+      "name": "swift-snapshot-testing",
+      "version": "1.17.0",
+      "description": "TEST-ONLY dependency. Not shipped in production binary.",
+      "scope": "optional",
+      "licenses": [{ "license": { "id": "MIT" } }],
+      "purl": "pkg:swift/pointfreeco/swift-snapshot-testing@1.17.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "swift-crypto@3.6.0",
+      "name": "swift-crypto",
+      "version": "3.6.0",
+      "description": "TEST-ONLY dependency, scoped to Linux platform via .testTarget condition. Not shipped in production binary.",
+      "scope": "optional",
+      "licenses": [{ "license": { "id": "Apache-2.0" } }],
+      "purl": "pkg:swift/apple/swift-crypto@3.6.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "rakomi-swift@0.1.0",
+      "dependsOn": []
+    }
+  ],
+  "vulnerabilities": []
+}
