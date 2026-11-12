@@ -1,0 +1,10 @@
+{
+  "surface": "swift",
+  "repository": "rakomidev/rakomi-swift",
+  "package": "RakomiSDK",
+  "tagFormat": "{{version}}",
+  "version": { "file": "sbom.cdx.json", "kind": "cyclonedx" },
+  "sbom": "sbom.cdx.json",
+  "releaseTimeFiles": [],
+  "exporter": "scripts/export-swift-cleanroom.mjs"
+}

@@ -1,0 +1,77 @@
+{
+  "_generator": "scripts/snapshot-rn-flutter-surface.mjs",
+  "_source": "packages/flutter/lib/rakomi_flutter.dart",
+  "_generated_at": "2026-04-27",
+  "exports": {
+    "widgets": [
+      "RakomiProvider",
+      "RakomiAuthGate",
+      "RakomiSignInButton",
+      "RakomiSignInForm",
+      "RakomiUserAvatar"
+    ],
+    "auth": [
+      "RakomiAuth",
+      "AuthEvent",
+      "AuthState",
+      "AuthStateAuthenticated",
+      "AuthStateUnauthenticated",
+      "AuthStateLoading",
+      "AuthStateError",
+      "SdkError",
+      "SdkErrorCode",
+      "SdkErrorReason",
+      "SocialProvider",
+      "User",
+      "Session"
+    ],
+    "native": [
+      "RakomiNativeAdapter",
+      "DefaultRakomiNativeAdapter",
+      "BiometricResult",
+      "BiometricSuccess",
+      "BiometricCancelled",
+      "BiometricLockout",
+      "BiometricNotEnrolled",
+      "BiometricUnavailable"
+    ],
+    "oauth": ["performSocialSignIn"]
+  },
+  "errorReasons": [
+    "oauth_user_cancelled",
+    "oauth_locked",
+    "oauth_state_mismatch",
+    "oauth_redirect_mismatch",
+    "oauth_missing_params",
+    "oauth_provider_error",
+    "biometric_cancelled",
+    "biometric_lockout",
+    "biometric_not_enrolled",
+    "biometric_unavailable",
+    "session_expired",
+    "session_revoked",
+    "refresh_expired",
+    "refresh_revoked",
+    "refresh_network",
+    "network",
+    "unknown"
+  ],
+  "errorCodes": [
+    "REFRESH_FAILED",
+    "OAUTH_CALLBACK_ERROR",
+    "TENANT_SUSPENDED",
+    "CSRF_MISMATCH",
+    "CODE_EXCHANGE_FAILED",
+    "SIGN_IN_FAILED",
+    "INVALID_CONFIG",
+    "NETWORK_ERROR",
+    "PROVIDER_ERROR",
+    "BIOMETRIC_ERROR",
+    "STORAGE_ERROR",
+    "RATE_LIMITED",
+    "INVALID_CREDENTIALS",
+    "MFA_STEP_UP_REQUIRED",
+    "MFA_STEP_UP_UNAVAILABLE",
+    "UNKNOWN"
+  ]
+}
