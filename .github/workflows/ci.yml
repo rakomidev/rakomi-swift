@@ -1,0 +1,66 @@
+name: CI
+
+# Pull requests (including release pull requests) and pushes to main: build and test the package on
+# macOS and check that the release scripts load.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          swift --version
+          xcodebuild -version
+
+      - name: Build (debug, warnings as errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Build (release configuration)
+        run: swift build -c release
+
+      - name: Test
+        run: swift test
+
+  release-scripts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: The release scripts load and the declared version matches the SBOM
+        run: |
+          set -euo pipefail
+          for F in .github/scripts/*.mjs .github/scripts/lib/*.mjs; do node --check "${F}"; done
+          node --input-type=module -e "
+            import { readFileSync } from 'node:fs'
+            import { SURFACE, readDeclaredVersion, sbomViolations } from './.github/scripts/lib/release-source-surface.mjs'
+            const v = readDeclaredVersion(readFileSync(SURFACE.versionFile, 'utf8'))
+            const bad = v ? sbomViolations(readFileSync(SURFACE.sbom, 'utf8'), v) : ['no declared version']
+            if (bad.length) { console.error(bad.join('\n')); process.exit(1) }
+            console.log(SURFACE.package + ' ' + v)
+          "
