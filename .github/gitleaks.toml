@@ -1,0 +1,16 @@
+# Secret scan of a release tag commit (release.yml). The default gitleaks rules apply in full; the
+# exceptions below are test literals, each limited to one rule and one exact value or one file.
+title = "rakomi-swift release scan"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Signed test tokens of the JWT verifier tests; their JWKS holds public keys only"
+targetRules = ["jwt"]
+paths = ['''(^|/)Tests/RakomiSDKTests/Fixtures/jwt_fixtures\.json$''']
+
+[[allowlists]]
+description = "Placeholder token and storage key literals of the unit tests"
+targetRules = ["generic-api-key"]
+regexes = ['''^eyJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJ1c2VyIn0\.signature$''', '''^rakomi\.v1\.test\.x$''']
