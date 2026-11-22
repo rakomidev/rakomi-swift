@@ -7,16 +7,20 @@ import Foundation
 let defaultRefreshLeadtime: TimeInterval = 60
 
 /// Default value carried by `RakomiAuthConfiguration.freshAuthWindow`.
-/// ⚠ NOT WIRED — no code path reads it, so it gates and skips nothing.
+/// Read only when `RakomiAuthConfiguration.requireBiometricUnlock` is on.
 /// KEPT public: a public init's default-argument expression must be at
 /// least as accessible as the init itself —
 /// `RakomiAuthConfiguration.init(freshAuthWindow:)` defaults to this
 /// symbol, so narrowing it to `internal` fails to compile for an external
-/// caller ("referenced from a default argument value"), independent of
-/// whether the field itself does anything.
+/// caller ("referenced from a default argument value").
 public let defaultFreshAuthWindow: TimeInterval = 30
 
-/// Maximum JWKS payload accepted from `/.well-known/jwks.json`.
+/// Default reason shown in the system biometric dialog when
+/// `RakomiAuthConfiguration.requireBiometricUnlock` is on. Public for the same
+/// reason as `defaultFreshAuthWindow`: it is a public init's default argument.
+public let defaultBiometricPromptReason: String = "Unlock to continue"
+
+/// Maximum JWKS payload accepted from the issuer's `jwks_uri`.
 /// Defensive cap — anomalous-large responses are rejected as
 /// `SdkError(reason:.network, errorMessage: "jwks_oversize")`.
 let maxJWKSResponseBytes: Int = 16 * 1024
@@ -43,14 +47,7 @@ let pkceVerifierBytes: Int = 32
 let oauthStateBytes: Int = 32
 
 /// SDK version exposed to USER-AGENT and SBOM components.
-let rakomiSDKVersion: String = "0.1.0"
-
-/// Default JWKS path appended to `apiBaseURL`.
-/// ⚠ UNWIRED: `RakomiAuthConfiguration.init` hardcodes the literal
-/// `.well-known/jwks.json` path instead of referencing this constant —
-/// nothing in the module reads it. Internal — not part of the public API
-/// surface.
-let defaultJWKSPath: String = "/.well-known/jwks.json"
+let rakomiSDKVersion: String = "0.2.0"
 
 /// Storage namespace prefix. v1 is reserved for future migration.
 let storageNamespace: String = "rakomi.v1"

@@ -32,24 +32,17 @@ public struct MFA: Sendable {
             )
             return
         }
-        struct Resp: Decodable {
-            let accessToken: String
-            let refreshToken: String?
-            let expiresIn: Int
-        }
         do {
-            let body: [String: Any] = ["challenge_id": challengeId, "code": code]
+            // `challengeId` carries the `mfa_challenge_token` the login response
+            // handed back — an opaque single-use token, not a database id.
+            let body: [String: Any] = ["mfa_challenge_token": challengeId, "code": code]
             let httpClient = controller.httpClient
             let resp = try await httpClient.post(
-                path: "/v1/auth/mfa/totp/verify",
+                path: "/v1/auth/mfa/verify-login",
                 body: body,
-                as: Resp.self
+                as: APITokenResponse.self
             )
-            try await controller.completeSignIn(
-                accessToken: resp.accessToken,
-                refreshToken: resp.refreshToken,
-                expiresIn: TimeInterval(resp.expiresIn)
-            )
+            try await controller.completeSignIn(from: resp, fallbackReason: .mfaStepUpRequired, oauthClientId: nil)
             await controller.emitEvent(.mfaChallengeVerified)
         } catch let err as SdkError {
             await controller.emit(.error(err))

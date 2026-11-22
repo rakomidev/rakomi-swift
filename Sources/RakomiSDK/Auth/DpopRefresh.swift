@@ -30,31 +30,67 @@ public struct DpopRefreshHTTPResult: Sendable {
     /// `true` if the response signals a proof rejection (`invalid_dpop_proof`,
     /// `jti_replay`, or a generic 401 on a presented proof) — distinct, terminal.
     public let dpopProofRejected: Bool
+    /// The raw `Retry-After` response header, if present.
+    public let retryAfter: String?
+    /// The raw `Date` response header, if present (used for clock-skew capture).
+    public let serverDate: String?
 
     public init(
         statusCode: Int,
         body: Data,
         dpopNonce: String?,
         useDpopNonceChallenge: Bool,
-        dpopProofRejected: Bool
+        dpopProofRejected: Bool,
+        retryAfter: String? = nil,
+        serverDate: String? = nil
     ) {
         self.statusCode = statusCode
         self.body = body
         self.dpopNonce = dpopNonce
         self.useDpopNonceChallenge = useDpopNonceChallenge
         self.dpopProofRejected = dpopProofRejected
+        self.retryAfter = retryAfter
+        self.serverDate = serverDate
     }
 }
 
-/// Transport seam: perform ONE refresh POST with an optional DPoP proof header.
+/// Where a refresh token is presented. The session's origin decides it: the
+/// server refreshes a session issued to an OAuth client only at the token
+/// endpoint, where the client is named, and answers `/v1/auth/refresh` for such a
+/// session like an unknown token.
+public enum RefreshEndpoint: Sendable, Equatable {
+    /// `POST /v1/auth/refresh` (JSON) — a first-party session: password, MFA,
+    /// magic link, native Sign in with Apple, device code.
+    case firstParty
+    /// RFC 6749 §6 at the published token endpoint (form-encoded,
+    /// `grant_type=refresh_token` and `client_id`) — a session issued to an OAuth
+    /// client (browser sign-in).
+    case tokenEndpoint(URL, clientId: String)
+
+    /// The DPoP `htu` target: the URL the refresh is posted to.
+    var proofTarget: String {
+        switch self {
+        case .firstParty: return "/v1/auth/refresh"
+        case .tokenEndpoint(let url, _): return url.absoluteString
+        }
+    }
+}
+
+/// Transport seam: perform ONE refresh POST to `endpoint` with an optional DPoP
+/// proof header. Both refresh paths use it — a Bearer refresh passes no proof.
 /// Implemented over `HTTPClient` in production; faked in tests.
 public protocol DpopRefreshTransport: Sendable {
-    func sendRefresh(refreshToken: String, dpopProof: String?) async throws -> DpopRefreshHTTPResult
+    func sendRefresh(
+        refreshToken: String,
+        endpoint: RefreshEndpoint,
+        dpopProof: String?
+    ) async throws -> DpopRefreshHTTPResult
 }
 
 /// Production `DpopRefreshTransport` over the SDK's long-lived `HTTPClient`. POSTs
-/// `/v1/auth/refresh`, attaching the `DPoP` proof header when present, and extracts
-/// the RFC 9449 §8 nonce / proof-rejection signals from the response.
+/// to the endpoint the session belongs to, attaching the `DPoP` proof header when
+/// present, and extracts the RFC 9449 §8 nonce / proof-rejection signals from the
+/// response.
 ///
 /// Internal — not part of the public API surface. Its own initializer takes
 /// `HTTPClient`, which is itself internal; conformance to the public
@@ -62,22 +98,38 @@ public protocol DpopRefreshTransport: Sendable {
 /// only need to be as visible as the type itself.
 struct HTTPClientDpopRefreshTransport: DpopRefreshTransport {
     private let httpClient: HTTPClient
-    private let path: String
 
-    init(httpClient: HTTPClient, path: String = "/v1/auth/refresh") {
+    init(httpClient: HTTPClient) {
         self.httpClient = httpClient
-        self.path = path
     }
 
-    func sendRefresh(refreshToken: String, dpopProof: String?) async throws -> DpopRefreshHTTPResult {
+    func sendRefresh(
+        refreshToken: String,
+        endpoint: RefreshEndpoint,
+        dpopProof: String?
+    ) async throws -> DpopRefreshHTTPResult {
         var headers: [String: String]?
         if let dpopProof { headers = ["DPoP": dpopProof] }
-        let (data, http) = try await httpClient.send(
-            method: "POST",
-            path: path,
-            body: ["refresh_token": refreshToken],
-            extraHeaders: headers
-        )
+        let (data, http): (Data, HTTPURLResponse)
+        switch endpoint {
+        case .firstParty:
+            (data, http) = try await httpClient.send(
+                method: "POST",
+                path: "/v1/auth/refresh",
+                body: ["refresh_token": refreshToken],
+                extraHeaders: headers
+            )
+        case .tokenEndpoint(let url, let clientId):
+            (data, http) = try await httpClient.sendForm(
+                url: url,
+                fields: [
+                    "grant_type": "refresh_token",
+                    "refresh_token": refreshToken,
+                    "client_id": clientId,
+                ],
+                extraHeaders: headers
+            )
+        }
         return DpopRefreshHTTPResult.from(statusCode: http.statusCode, body: data, headers: http)
     }
 }
@@ -108,7 +160,9 @@ extension DpopRefreshHTTPResult {
             body: body,
             dpopNonce: nonce,
             useDpopNonceChallenge: useNonce,
-            dpopProofRejected: proofRejected
+            dpopProofRejected: proofRejected,
+            retryAfter: headers.value(forHTTPHeaderField: "Retry-After"),
+            serverDate: headers.value(forHTTPHeaderField: "Date")
         )
     }
 }
@@ -138,19 +192,30 @@ public enum DpopRefresh {
     /// Refresh the access token, attaching a DPoP proof IFF the session is bound.
     /// Performs the single bounded nonce retry and maps every failure into the
     /// three-class taxonomy. On success, re-confirms bound-truth from `token_type`.
+    ///
+    /// A transient failure (a 5xx, 429 or 408, or a transport failure) is the
+    /// `network` class: the session, the stored credential and the key binding
+    /// are all kept. A 2xx that cannot be read is `invalidRefreshToken`: the
+    /// server consumed the refresh token, and presenting it again would be a
+    /// reuse. `now` anchors an HTTP-date `Retry-After`.
     public static func refresh(
         transport: any DpopRefreshTransport,
         refreshToken: String,
-        tokenEndpoint: String,
-        session: DpopSession?
+        endpoint: RefreshEndpoint,
+        session: DpopSession?,
+        now: Date = Date()
     ) async -> DpopRefreshOutcome {
         let bound = await session?.isBound == true
 
         // ── Bearer path — no proof attached. ──
         guard bound, let session else {
             do {
-                let http = try await transport.sendRefresh(refreshToken: refreshToken, dpopProof: nil)
-                return await finish(http: http, session: session, attachedProof: false)
+                let http = try await transport.sendRefresh(
+                    refreshToken: refreshToken,
+                    endpoint: endpoint,
+                    dpopProof: nil
+                )
+                return await finish(http: http, session: session, attachedProof: false, now: now)
             } catch {
                 return .failure(networkError("refresh failed"))
             }
@@ -161,7 +226,7 @@ public enum DpopRefresh {
         //    controller BEFORE this async signing begins). ──
         var proof: String
         do {
-            proof = try await session.resolveProof(htm: "POST", target: tokenEndpoint)
+            proof = try await session.resolveProof(htm: "POST", target: endpoint.proofTarget)
         } catch {
             return .failure(proverUnavailable("DPoP prover threw"))
         }
@@ -171,7 +236,11 @@ public enum DpopRefresh {
 
         var http: DpopRefreshHTTPResult
         do {
-            http = try await transport.sendRefresh(refreshToken: refreshToken, dpopProof: proof)
+            http = try await transport.sendRefresh(
+                refreshToken: refreshToken,
+                endpoint: endpoint,
+                dpopProof: proof
+            )
         } catch {
             return .failure(networkError("refresh failed"))
         }
@@ -183,7 +252,7 @@ public enum DpopRefresh {
         {
             var retryProof: String
             do {
-                retryProof = try await session.resolveProof(htm: "POST", target: tokenEndpoint, nonce: nonce)
+                retryProof = try await session.resolveProof(htm: "POST", target: endpoint.proofTarget, nonce: nonce)
             } catch {
                 return .failure(proverUnavailable("DPoP prover threw on nonce retry"))
             }
@@ -191,13 +260,17 @@ public enum DpopRefresh {
                 return .failure(proverUnavailable("DPoP prover returned an empty proof on nonce retry"))
             }
             do {
-                http = try await transport.sendRefresh(refreshToken: refreshToken, dpopProof: retryProof)
+                http = try await transport.sendRefresh(
+                    refreshToken: refreshToken,
+                    endpoint: endpoint,
+                    dpopProof: retryProof
+                )
             } catch {
                 return .failure(networkError("refresh failed"))
             }
         }
 
-        return await finish(http: http, session: session, attachedProof: true)
+        return await finish(http: http, session: session, attachedProof: true, now: now)
     }
 
     // MARK: - Result mapping
@@ -205,34 +278,41 @@ public enum DpopRefresh {
     private static func finish(
         http: DpopRefreshHTTPResult,
         session: DpopSession?,
-        attachedProof: Bool
+        attachedProof: Bool,
+        now: Date
     ) async -> DpopRefreshOutcome {
         if (200..<300).contains(http.statusCode) {
+            // A success the SDK cannot read (a truncated body): the server has
+            // consumed the presented refresh token. Presenting it again would be
+            // a reuse, which revokes every session of the user, so this is the
+            // end of the session locally — never retried.
             guard let tokens = decode(http.body) else {
                 return .failure(
-                    SdkError(code: .refreshFailed, reason: .invalidRefreshToken, errorMessage: "refresh_decode_failed")
+                    SdkError(
+                        code: .refreshFailed,
+                        reason: .invalidRefreshToken,
+                        errorMessage: "refresh_decode_failed",
+                        httpStatus: http.statusCode
+                    )
                 )
             }
             await session?.observeTokenType(tokens.tokenType, attachedProof: attachedProof)
             return .success(tokens: tokens, attachedProof: attachedProof)
         }
-        return .failure(mapFailure(http))
+        return .failure(mapFailure(http, now: now))
     }
 
     private static func decode(_ data: Data) -> DpopRefreshTokens? {
-        struct Resp: Decodable {
-            let accessToken: String
-            let refreshToken: String?
-            let expiresIn: Int
-            let tokenType: String?
-        }
-        // Tolerate both camelCase and snake_case keys (the refresh endpoint returns
-        // camelCase per the existing Resp decode in RakomiAuthController).
-        if let r = try? JSONDecoder().decode(Resp.self, from: data) {
+        // The refresh endpoint answers in snake_case, which `APITokenResponse`
+        // maps explicitly. The hand-rolled pass below stays as a tolerant
+        // fallback for a body that is well-formed JSON but not that envelope.
+        if let r = try? JSONDecoder().decode(APITokenResponse.self, from: data),
+            let accessToken = r.accessToken
+        {
             return DpopRefreshTokens(
-                accessToken: r.accessToken,
+                accessToken: accessToken,
                 refreshToken: r.refreshToken,
-                expiresIn: r.expiresIn,
+                expiresIn: r.expiresIn ?? 0,
                 tokenType: r.tokenType
             )
         }
@@ -246,20 +326,47 @@ public enum DpopRefresh {
     }
 
     /// Map a failed refresh HTTP result into the three-class taxonomy.
-    private static func mapFailure(_ http: DpopRefreshHTTPResult) -> SdkError {
+    private static func mapFailure(_ http: DpopRefreshHTTPResult, now: Date) -> SdkError {
+        // 5xx / 429 / 408 ⇒ transport/network class, whatever the body says — the
+        // grant is still good and the key binding stays. Checked first, so a
+        // nonce header on an overloaded response never reads as a proof problem.
+        if RefreshFailure.isTransientStatus(http.statusCode) {
+            return RefreshFailure.transientError(
+                reason: .network,
+                message: "refresh_transient_\(http.statusCode)",
+                httpStatus: http.statusCode,
+                retryAfter: RefreshFailure.parseRetryAfter(http.retryAfter, now: now)
+            )
+        }
         // A proof rejection (or a nonce challenge that survived the single retry — a
         // second `use_dpop_nonce` is a proof problem, not a revocation) is the
         // distinct, rollback-actionable `invalid_dpop_proof` class.
         if http.dpopProofRejected || http.useDpopNonceChallenge {
             return SdkError(code: .refreshFailed, reason: .invalidDpopProof, errorMessage: "invalid_dpop_proof")
         }
-        // 5xx ⇒ transport/network class.
-        if (500...599).contains(http.statusCode) {
-            return networkError("refresh_5xx_\(http.statusCode)")
+        // Genuine revocation/expiry (a bare 401, or a 4xx naming the grant or the
+        // client as invalid, or one of the API's session-ending codes such as a
+        // 403 `auth/user_blocked`) ⇒ full re-login.
+        if RefreshFailure.isDefinitiveRejection(
+            status: http.statusCode,
+            oauthError: RefreshFailure.oauthError(from: http.body)
+        ) {
+            return SdkError(
+                code: .refreshFailed,
+                reason: .invalidRefreshToken,
+                errorMessage: "invalid_refresh_token",
+                httpStatus: http.statusCode
+            )
         }
-        // Genuine revocation/expiry (401/403 without a proof signal, or any other
-        // terminal auth failure) ⇒ full re-login.
-        return SdkError(code: .refreshFailed, reason: .invalidRefreshToken, errorMessage: "invalid_refresh_token")
+        // Any other rejection (for example a 403 with no session-ending code, which a proxy
+        // in front of the API can produce) does not prove the session is over: it
+        // is kept, and not retried automatically.
+        return SdkError(
+            code: .refreshFailed,
+            reason: .unknown,
+            errorMessage: "refresh_rejected_\(http.statusCode)",
+            httpStatus: http.statusCode
+        )
     }
 
     private static func proverUnavailable(_ message: String) -> SdkError {

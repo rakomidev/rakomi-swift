@@ -21,7 +21,28 @@ public struct DeviceAuthorizationStart: Sendable, Decodable, Equatable {
     }
 }
 
+/// What a non-2xx answer of `/v1/auth/oauth/device/token` means for the
+/// polling loop. The route is a `/v1/*` route, so its RFC 8628 §3.5 polling
+/// states arrive as RFC 9457 problem+json with HTTP 400 and the state in the
+/// `code` member (`oauth/authorization_pending`, `oauth/slow_down`,
+/// `oauth/access_denied`, `oauth/expired_token`); there is no `error` member.
+enum DevicePollAnswer: Equatable {
+    case pending
+    case slowDown
+    case denied
+    case expired
+    case unexpected
+}
+
+private struct DevicePollProblem: Decodable {
+    let code: String?
+}
+
 public struct DeviceCode: Sendable {
+    /// RFC 8628 §3.5: every `slow_down` answer raises the polling interval
+    /// by 5 seconds for this and all later polls.
+    static let slowDownIncrement: TimeInterval = 5
+
     public let controller: RakomiAuthController
 
     public init(controller: RakomiAuthController) {
@@ -45,15 +66,23 @@ public struct DeviceCode: Sendable {
         return started
     }
 
+    /// Reads a non-2xx polling answer by the route's RFC 9457 `code` member.
+    static func pollAnswer(statusCode: Int, body: Data) -> DevicePollAnswer {
+        guard statusCode == 400,
+            let problem = try? JSONDecoder().decode(DevicePollProblem.self, from: body)
+        else { return .unexpected }
+        switch problem.code {
+        case "oauth/authorization_pending": return .pending
+        case "oauth/slow_down": return .slowDown
+        case "oauth/access_denied": return .denied
+        case "oauth/expired_token": return .expired
+        default: return .unexpected
+        }
+    }
+
     func poll(start: DeviceAuthorizationStart) async {
         var interval = TimeInterval(start.interval)
         let deadline = Date().addingTimeInterval(TimeInterval(start.expiresIn))
-        struct PollResp: Decodable {
-            let accessToken: String?
-            let refreshToken: String?
-            let expiresIn: Int?
-            let error: String?
-        }
         let httpClient = controller.httpClient
         let configuration = controller.configuration
 
@@ -71,7 +100,7 @@ public struct DeviceCode: Sendable {
                     body: body
                 )
                 if (200..<300).contains(http.statusCode) {
-                    let resp = try JSONDecoder().decode(PollResp.self, from: data)
+                    let resp = try JSONDecoder().decode(APITokenResponse.self, from: data)
                     guard let access = resp.accessToken,
                         let expiresIn = resp.expiresIn
                     else {
@@ -89,18 +118,20 @@ public struct DeviceCode: Sendable {
                     try await controller.completeSignIn(
                         accessToken: access,
                         refreshToken: resp.refreshToken,
-                        expiresIn: TimeInterval(expiresIn)
+                        expiresIn: TimeInterval(expiresIn),
+                        // The publishable-key device flow issues a first-party
+                        // session (no OAuth client): it refreshes at /v1/auth/refresh.
+                        oauthClientId: nil
                     )
                     return
                 }
-                let payload = try? JSONDecoder().decode(PollResp.self, from: data)
-                switch payload?.error {
-                case "authorization_pending":
+                switch Self.pollAnswer(statusCode: http.statusCode, body: data) {
+                case .pending:
                     continue
-                case "slow_down":
-                    interval *= 2
+                case .slowDown:
+                    interval += Self.slowDownIncrement
                     continue
-                case "access_denied":
+                case .denied:
                     await controller.emit(
                         .error(
                             SdkError(
@@ -111,7 +142,7 @@ public struct DeviceCode: Sendable {
                         )
                     )
                     return
-                case "expired_token":
+                case .expired:
                     await controller.emit(
                         .error(
                             SdkError(
@@ -122,7 +153,7 @@ public struct DeviceCode: Sendable {
                         )
                     )
                     return
-                default:
+                case .unexpected:
                     await controller.emit(
                         .error(
                             SdkError(

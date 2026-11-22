@@ -62,7 +62,9 @@ struct ContentView: View {
 
 ## OIDC vs OAuth 2.0 in Rakomi
 
-We issue OAuth 2.0 access tokens RS256-signed with `kid` header. Token
+We issue OAuth 2.0 access tokens signed with RS256, PS256 or ES256 and a `kid`
+header; the SDK verifies them only against the keys at the issuer's own
+`jwks_uri`, read from the issuer's discovery document. Token
 lifetimes: access ~15 min, refresh ~7 days. `id_token` landing for OIDC
 relying-party scenarios is a future release — out of scope for 0.1.
 
@@ -78,8 +80,8 @@ security layer.
 Per CRA Reg. 2024/2847 ("product with digital elements") and NIS2
 supply-chain posture: every additional runtime dependency is a 10-year
 disclosure liability. Apple's frameworks are sufficient for our entire
-auth surface (`SecRandomCopyBytes` for CSPRNG, `CryptoKit` for SHA-256,
-`Security` framework for Keychain + RS256 verification,
+auth surface (`SecRandomCopyBytes` for CSPRNG, `CryptoKit` for SHA-256 and
+P-256 signatures, `Security` framework for Keychain + RSA signature verification,
 `AuthenticationServices` for system browser + Sign in with Apple).
 
 ## OAuth 2.1 readiness
@@ -87,7 +89,10 @@ auth surface (`SecRandomCopyBytes` for CSPRNG, `CryptoKit` for SHA-256,
 - PKCE S256 mandatory (no `plain` fallback).
 - Implicit grant: not used.
 - Password grant: not used for new clients.
-- Refresh-token rotation: server-side (consumed via `/v1/auth/refresh`).
+- Refresh-token rotation: server-side. A browser sign-in session refreshes at the
+  published `token_endpoint` (`grant_type=refresh_token` with its `client_id`) and
+  is revoked there on sign-out (`revocation_endpoint`); every other session
+  refreshes at `/v1/auth/refresh`.
 
 ## Custom URL scheme caveats
 
@@ -153,7 +158,7 @@ Optional certificate pinning (`certificateFingerprints`) applies to the
 - **GDPR Art. 25 (privacy by design)**: non-blocking mount, no telemetry,
   no token logging, Keychain namespacing, secure defaults.
 - **GDPR Art. 32 (technical measures)**: Keychain encryption-at-rest with
-  `AfterFirstUnlockThisDeviceOnly`, RS256, CSPRNG via `SecRandomCopyBytes`,
+  `AfterFirstUnlockThisDeviceOnly`, RS256/PS256/ES256 token signatures, CSPRNG via `SecRandomCopyBytes`,
   HTTPS required for the API base URL with a development-only `http://`
   exception (see "Transport security" below), redacted error strings.
 - **NIS2 supply-chain**: ZERO third-party runtime dependencies; coordinated
@@ -201,7 +206,7 @@ Authorization Grant (RFC 8628)**:
 // On tvOS
 let start = try await RakomiAuth.shared.startDeviceAuthorization()
 // Display start.userCode + start.verificationURI to the user;
-// they enter the code on their phone/computer at https://rakomi.com/device.
+// they enter the code on their phone/computer at https://dashboard.rakomi.com/device.
 // SDK polls in the background and transitions to `.authenticated` on approval.
 ```
 
@@ -210,11 +215,11 @@ let start = try await RakomiAuth.shared.startDeviceAuthorization()
 ## Distribution
 
 ```
-.package(url: "https://github.com/rakomidev/rakomi-swift", from: "0.1.0")
+.package(url: "https://github.com/rakomidev/rakomi-swift", from: "0.2.0")
 ```
 
 Add `RakomiSDK` to your target's dependencies. Releases on this repository are tagged with bare
-SemVer (`X.Y.Z`, no prefix) — e.g. `0.1.0` — matching the `from:` version above.
+SemVer (`X.Y.Z`, no prefix) — e.g. `0.2.0` — matching the `from:` version above.
 
 ## Development
 
