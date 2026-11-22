@@ -6,6 +6,14 @@
 
 import Foundation
 
+/// Default expected `iss`/`aud` when a caller derives neither from its own
+/// configuration. Mirrors `rakomi_flutter`'s `kRakomiPlatformIssuerDefault`/
+/// `kRakomiPlatformAudienceDefault` and `@rakomi/react-native`'s
+/// `RAKOMI_PLATFORM_ISSUER_DEFAULT`/`RAKOMI_PLATFORM_AUDIENCE_DEFAULT`
+/// (`packages/react-native/src/internal/token-runtime.ts`).
+let kRakomiPlatformIssuerDefault = URL(string: "https://api.rakomi.com")!
+let kRakomiPlatformAudienceDefault = "https://api.rakomi.com"
+
 /// Top-level configuration for `RakomiAuth`. Multiple instances are
 /// supported (per-tenant test harnesses, multi-issuer apps); the SDK
 /// does NOT enforce process-global singleton semantics.
@@ -21,26 +29,54 @@ public struct RakomiAuthConfiguration: Sendable {
     /// + on-prem deployments override this.
     public let apiBaseURL: URL
 
-    /// JWT issuer claim. If nil, defaults to `apiBaseURL`. Multi-tenant
-    /// + self-managed deployments require this override.
+    /// JWT issuer claim. Defaults to a value DERIVED from `apiBaseURL` (see
+    /// `deriveDefaultIssuer(from:)`) — a tenant that has bound its own custom
+    /// domain as its issuer host is issued tokens whose `iss` is that host
+    /// (RFC 8414 §3.3), not a shared platform constant. A PLATFORM host
+    /// (`isPlatformHost(_:)` — `rakomi.com`/any subdomain of it, or a
+    /// local-dev host) always degrades to the frozen platform constant
+    /// instead, since the server's issuer identity is frozen there in every
+    /// environment. Multi-issuer test harnesses override it explicitly.
     public let issuer: URL
 
-    /// JWKS endpoint URL. Defaults to `${apiBaseURL}/.well-known/jwks.json`.
-    public let jwksURL: URL
+    /// Override where signing keys are read from. `nil` (the default) reads
+    /// the `jwks_uri` named in the expected issuer's discovery document, so
+    /// only that issuer's keys are trusted. Rare in production (a JWKS proxy).
+    public let jwksURL: URL?
+
+    /// OAuth client id for the browser sign-in flow (RFC 6749 §2.2). Required
+    /// for `signIn(withProvider:)`, which is an authorization-code exchange with
+    /// PKCE against the tenant's hosted login; the publishable key identifies the
+    /// tenant and is not a substitute for it.
+    ///
+    /// The client must be a PUBLIC client — a native app cannot keep a secret —
+    /// and must have this configuration's `redirectURI` registered on it, byte
+    /// for byte. Leave it `nil` if the app signs in with a password only: the
+    /// prebuilt sign-in form then renders no provider buttons, rather than
+    /// offering an action that cannot complete.
+    public let clientId: String?
+
+    /// Scopes requested on the browser flow. Defaults to `openid profile email`.
+    public let scope: String
 
     /// Optional Keychain access group for app-extension / app-group sharing.
     public let keychainAccessGroup: String?
 
-    /// ⚠ ACCEPTED BUT NOT WIRED — this value gates nothing and skips nothing.
-    /// No code path reads it, and its companion marker
-    /// `StorageKeys.freshAuthTimestamp` is never written and never read. There
-    /// is no fresh-auth window at runtime, in either direction. Setting it to
-    /// any value — including `0` — changes no behaviour.
+    /// Whether this configuration can start a browser sign-in at all.
+    public var supportsBrowserSignIn: Bool {
+        guard let clientId else { return false }
+        return !clientId.isEmpty
+    }
+
+    /// How long, in seconds, a successful biometric prompt keeps the biometric
+    /// lock open. Read only when `requireBiometricUnlock` is `true`; with the
+    /// lock off it has no effect.
     ///
-    /// A biometric prompt is available through `unlockWithBiometric(reason:)`,
-    /// which the application calls when it wants one. It is an ADDITIONAL path
-    /// into hydration, not a gate in front of it: `hydrate()`, `getToken()` and
-    /// the refresh path read the stored credential without prompting.
+    /// Inside the window, hydration and token refreshes use the stored
+    /// credential without prompting again. Once it has elapsed, the next
+    /// operation that needs the stored credential prompts first. `0` prompts
+    /// on every such operation. A successful `unlockWithBiometric(reason:)`
+    /// also opens the window.
     public let freshAuthWindow: TimeInterval
 
     /// Optional SHA-256 certificate fingerprints for pinning. Accepted forms:
@@ -49,10 +85,35 @@ public struct RakomiAuthConfiguration: Sendable {
     /// pinning; it never widens what is accepted.
     public let certificateFingerprints: [String]?
 
-    /// Default audience for JWT verification. Frozen to `https://api.rakomi.com` —
-    /// the platform audience, independent of `apiBaseURL`. Customer overrides
-    /// remain supported for multi-issuer test harnesses.
+    /// Default audience for JWT verification. Frozen to
+    /// `kRakomiPlatformAudienceDefault` (`https://api.rakomi.com`) — the
+    /// platform audience, independent of `apiBaseURL`: Rakomi user-flow
+    /// access tokens never vary `aud` with the resolved per-tenant `iss`
+    /// (confirmed server-side). Customer overrides remain supported for
+    /// multi-issuer test harnesses.
     public let audience: String?
+
+    /// Opt-in biometric lock. Defaults to `false`, which keeps the stored
+    /// credential usable without a prompt.
+    ///
+    /// When `true`, the SDK shows the system biometric prompt BEFORE it reads
+    /// or uses the stored refresh credential: on `hydrate()` (cold start),
+    /// on `getToken()` when it has to restore or refresh the session, and on
+    /// every refresh — unless a biometric prompt already succeeded within
+    /// `freshAuthWindow`. An access token already held in memory after a
+    /// successful unlock is returned without prompting.
+    ///
+    /// A cancelled, failed or unavailable prompt yields no token: `getToken()`
+    /// and `refreshTokens()` throw an `SdkError` with code `.biometricError`
+    /// (reason `.biometricCancelled`, `.biometricLockout`,
+    /// `.biometricNotEnrolled` or `.biometricUnavailable`), and hydration
+    /// settles on `AuthState.error` with that error. The stored credential is
+    /// kept, so a later `getToken()` or `unlockWithBiometric(reason:)` can
+    /// retry. Hydration prompts only when a stored credential exists.
+    public let requireBiometricUnlock: Bool
+
+    /// Reason shown in the system biometric dialog when the lock prompts.
+    public let biometricPromptReason: String
 
     /// Throws on:
     ///   - `redirectURI.scheme` in {http, https, javascript, data, file, vbscript, about}
@@ -67,10 +128,14 @@ public struct RakomiAuthConfiguration: Sendable {
         apiBaseURL: URL = URL(string: "https://api.rakomi.com")!,
         issuer: URL? = nil,
         jwksURL: URL? = nil,
+        clientId: String? = nil,
+        scope: String = "openid profile email",
         keychainAccessGroup: String? = nil,
         freshAuthWindow: TimeInterval = defaultFreshAuthWindow,
         certificateFingerprints: [String]? = nil,
-        audience: String? = nil
+        audience: String? = nil,
+        requireBiometricUnlock: Bool = false,
+        biometricPromptReason: String = defaultBiometricPromptReason
     ) throws {
         guard !publishableKey.isEmpty else {
             throw SdkError(
@@ -121,18 +186,99 @@ public struct RakomiAuthConfiguration: Sendable {
         self.publishableKey = publishableKey
         self.redirectURI = redirectURI
         self.apiBaseURL = apiBaseURL
-        // JWT `iss` is frozen at `https://api.rakomi.com` — the platform identifier,
-        // not the (customer-configurable) API base URL. Custom-domain tenants still
-        // receive tokens with this issuer (a custom domain is routing only).
-        self.issuer = issuer ?? URL(string: "https://api.rakomi.com")!
-        self.jwksURL = jwksURL ?? apiBaseURL.appendingPathComponent(".well-known/jwks.json")
+        // Default expected `iss` is DERIVED from `apiBaseURL`, not unconditionally
+        // hardcoded to the platform constant: a tenant that has bound its own custom
+        // domain as its issuer host is issued tokens whose `iss` is that host (RFC
+        // 8414 §3.3) — a custom domain is NOT routing-only. A PLATFORM host
+        // (`isPlatformHost(_:)`), by contrast, always expects the frozen platform
+        // constant regardless of which platform host `apiBaseURL` names — the
+        // server's own issuer identity is frozen there in every environment, so
+        // deriving the expectation from the host itself would reject every real
+        // token a staging/dev deployment mints. See `deriveDefaultIssuer(from:)`'s
+        // doc comment for the exact host classification.
+        self.issuer = issuer ?? Self.deriveDefaultIssuer(from: apiBaseURL)
+        self.jwksURL = jwksURL
+        self.clientId = clientId
+        self.scope = scope
         self.keychainAccessGroup = keychainAccessGroup
         self.freshAuthWindow = freshAuthWindow
         self.certificateFingerprints = certificateFingerprints
-        // Default audience is the platform constant `https://api.rakomi.com`,
-        // independent of `apiBaseURL`. A customer-supplied override is preserved
+        // Default audience is the frozen platform constant
+        // `kRakomiPlatformAudienceDefault`, independent of `apiBaseURL` — Rakomi
+        // user-flow access tokens never vary `aud` with the resolved per-tenant
+        // `iss` (confirmed server-side). A customer-supplied override is preserved
         // for test harnesses.
-        self.audience = audience ?? "https://api.rakomi.com"
+        self.audience = audience ?? kRakomiPlatformAudienceDefault
+        self.requireBiometricUnlock = requireBiometricUnlock
+        self.biometricPromptReason = biometricPromptReason
+    }
+
+    // MARK: - Issuer derivation
+
+    /// True iff `host` is a PLATFORM host — the server's own JWT issuer
+    /// identity is FROZEN to `kRakomiPlatformIssuerDefault` in every
+    /// environment (dev, staging, prod alike), so any base URL resolving to
+    /// one of these hosts MUST expect the frozen constant, never a value
+    /// derived from the host itself.
+    ///
+    /// - `rakomi.com` or any subdomain of it (`api.rakomi.com`,
+    ///   `accounts.rakomi.com`, an environment-qualified `api.` subdomain, …)
+    ///   — matched on a DNS LABEL boundary
+    ///   (`host == "rakomi.com" || host.hasSuffix(".rakomi.com")`), NEVER by
+    ///   substring: `evilrakomi.com` and `rakomi.com.evil.net` must both be
+    ///   REJECTED as platform hosts (see the should-FAIL tests).
+    /// - `localhost` / `127.0.0.1` / `::1` — the local dev API also mints
+    ///   under the same frozen issuer identity.
+    ///
+    /// `host` is compared lowercase — defensive, since `URL.host` already
+    /// lowercases, but this function must not assume that stays true forever.
+    static func isPlatformHost(_ host: String) -> Bool {
+        let h = host.lowercased()
+        if h == "localhost" || h == "127.0.0.1" || h == "::1" { return true }
+        return h == "rakomi.com" || h.hasSuffix(".rakomi.com")
+    }
+
+    /// Derive the default expected `iss` for offline verification from
+    /// [apiBaseURL] — the value this configuration was constructed with.
+    ///
+    /// **A PLATFORM host** ([isPlatformHost]) always expects
+    /// [kRakomiPlatformIssuerDefault] — the server's issuer identity is
+    /// frozen there regardless of which platform host the app happens to be
+    /// pointed at, so deriving the expectation from the host itself would
+    /// reject every real token a staging/dev deployment mints.
+    ///
+    /// **Any other host** (a tenant's bound custom domain) expects
+    /// `baseURL` itself; the derived value strips query/fragment and a
+    /// trailing slash so `https://host/env` and `https://host/env/` compare
+    /// equal — the ONE leniency this comparison allows, never a
+    /// prefix/suffix match. Falls back to [kRakomiPlatformIssuerDefault]
+    /// when `baseURL` carries no scheme or host — construction never throws
+    /// on this path since `apiBaseURL` was already validated by
+    /// `isAcceptableAPIBaseURL` above. Mirrors `rakomi_flutter`'s
+    /// `deriveDefaultIssuer` and `@rakomi/react-native`'s
+    /// `deriveDefaultIssuer`
+    /// (`packages/react-native/src/internal/token-runtime.ts`).
+    static func deriveDefaultIssuer(from baseURL: URL) -> URL {
+        guard let scheme = baseURL.scheme, let host = baseURL.host, !host.isEmpty else {
+            return kRakomiPlatformIssuerDefault
+        }
+        if isPlatformHost(host) {
+            return kRakomiPlatformIssuerDefault
+        }
+        var authority = host
+        if let port = baseURL.port {
+            authority += ":\(port)"
+        }
+        var path = baseURL.path
+        if path.count > 1, path.hasSuffix("/") {
+            path.removeLast()
+        } else if path == "/" {
+            path = ""
+        }
+        guard let derived = URL(string: "\(scheme)://\(authority)\(path)") else {
+            return kRakomiPlatformIssuerDefault
+        }
+        return derived
     }
 
     // MARK: - Validation helpers
@@ -165,8 +311,9 @@ public struct RakomiAuthConfiguration: Sendable {
         return !banned.contains(scheme) && !scheme.isEmpty
     }
 
-    /// Tenant id derived from publishable key. Format: `pk_(test|live)_<tenantId>`.
-    /// Falls back to a stable hash of the publishable key if format unrecognized.
+    /// Tenant id derived from the publishable key. A real, dashboard-issued key never carries a
+    /// parseable tenant id, so this resolves via a stable hash of the whole key — every call site
+    /// hits that path.
     public var tenantId: String {
         let parts = publishableKey.split(separator: "_", maxSplits: 2, omittingEmptySubsequences: true)
         if parts.count == 3, parts[0] == "pk" {

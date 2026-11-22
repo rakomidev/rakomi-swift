@@ -1,5 +1,10 @@
-// ASWebAuthenticationSession orchestration
-// for social sign-in.
+// Browser sign-in: RFC 8252 authorization-code with PKCE.
+//
+// The system browser goes to the authorization endpoint the server PUBLISHES
+// (RFC 8414 discovery — the API host is not the host that renders the login
+// page), comes back to this app's private-use redirect scheme, and the code is
+// exchanged at the published token endpoint. `ASWebAuthenticationSession`
+// intercepts the redirect; no in-app web view is involved, ever.
 
 import Foundation
 
@@ -29,28 +34,50 @@ public struct SocialAuth: Sendable {
         }
     }
 
-    private func performFlow(provider: SocialProvider) async throws {
+    private func performFlow(provider: SocialProvider?) async throws {
         let configuration = controller.configuration
-        let oauthStore = controller.oauthStore
+        guard let clientId = configuration.clientId, !clientId.isEmpty else {
+            // Fail closed and say which value is missing. Starting a browser on
+            // a request the server must reject is worse than not starting one.
+            throw SdkError(
+                code: .invalidConfig,
+                reason: .notConfigured,
+                errorMessage: "oauth_client_id_missing"
+            )
+        }
 
-        // Mint state + PKCE.
-        let flow = try await oauthStore.mint()
+        let metadata = try await controller.authorizationServerMetadata()
+        let flow = try await controller.oauthStore.mint()
 
-        // Build authorize URL.
-        var components = URLComponents(
-            url: configuration.apiBaseURL.appendingPathComponent("/v1/auth/oauth/start"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [
-            URLQueryItem(name: "provider", value: provider.wire),
-            URLQueryItem(name: "publishable_key", value: configuration.publishableKey),
+        guard
+            var components = URLComponents(
+                url: metadata.authorizationEndpoint,
+                resolvingAgainstBaseURL: false
+            )
+        else {
+            throw SdkError(
+                code: .invalidConfig,
+                reason: .notConfigured,
+                errorMessage: "authorization_endpoint_unparseable"
+            )
+        }
+        var items = components.queryItems ?? []
+        items.append(contentsOf: [
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "client_id", value: clientId),
             URLQueryItem(name: "redirect_uri", value: configuration.redirectURI.absoluteString),
             URLQueryItem(name: "state", value: flow.state),
             URLQueryItem(name: "code_challenge", value: flow.challenge),
             URLQueryItem(name: "code_challenge_method", value: PKCE.challengeMethod),
-            URLQueryItem(name: "ott", value: flow.oneTimeId),
-        ]
-        guard let authURL = components?.url else {
+            URLQueryItem(name: "scope", value: configuration.scope),
+        ])
+        if let provider {
+            // A hint, not a requirement: the hosted page decides what it offers.
+            items.append(URLQueryItem(name: "provider", value: provider.wire))
+        }
+        components.queryItems = items
+
+        guard let authURL = components.url else {
             throw SdkError(
                 code: .invalidConfig,
                 reason: .invalidCredentials,
@@ -58,10 +85,8 @@ public struct SocialAuth: Sendable {
             )
         }
 
-        // Launch system browser; await callback URL.
         let scheme = configuration.redirectURI.scheme ?? "rakomi"
-        let adapter = controller.adapter
-        let result = await adapter.launchSystemBrowser(url: authURL, callbackScheme: scheme)
+        let result = await controller.adapter.launchSystemBrowser(url: authURL, callbackScheme: scheme)
         switch result {
         case .cancelled:
             throw SdkError(
@@ -72,7 +97,32 @@ public struct SocialAuth: Sendable {
         case .failed(let err):
             throw err
         case .success(let callbackURL):
-            try await processCallback(callbackURL: callbackURL, oneTimeId: flow.oneTimeId, expectedState: flow.state)
+            try await processCallback(
+                callbackURL: callbackURL,
+                oneTimeId: flow.oneTimeId,
+                expectedState: flow.state
+            )
+        }
+    }
+
+    /// Start a browser sign-in with no provider hint — the hosted page offers
+    /// whatever the tenant has configured.
+    public func signIn() async {
+        await controller.emit(.loading)
+        do {
+            try await performFlow(provider: nil)
+        } catch let err as SdkError {
+            await controller.emit(.error(err))
+        } catch {
+            await controller.emit(
+                .error(
+                    SdkError(
+                        code: .oauthCallbackError,
+                        reason: .oauthProviderError,
+                        errorMessage: "social_unknown_error"
+                    )
+                )
+            )
         }
     }
 
@@ -109,10 +159,9 @@ public struct SocialAuth: Sendable {
             )
         }
 
-        // RFC 9700 §4.4 — iss mix-up defense.
+        // RFC 9700 §4.4 — issuer mix-up defence.
         let configuration = controller.configuration
         if let iss = getter("iss"), iss != configuration.issuer.absoluteString {
-            // Allow trailing slash divergence.
             if iss.trimmingCharacters(in: ["/"]) != configuration.issuer.absoluteString.trimmingCharacters(in: ["/"]) {
                 throw SdkError(
                     code: .oauthCallbackError,
@@ -122,9 +171,8 @@ public struct SocialAuth: Sendable {
             }
         }
 
-        // Constant-time state validation.
-        let oauthStore = controller.oauthStore
-        guard let stored = await oauthStore.consume(oneTimeId: oneTimeId) else {
+        // Constant-time, single-use state validation.
+        guard let stored = await controller.oauthStore.consume(oneTimeId: oneTimeId) else {
             throw SdkError(
                 code: .oauthCallbackError,
                 reason: .oauthStateMismatch,
@@ -139,45 +187,28 @@ public struct SocialAuth: Sendable {
             )
         }
 
-        // Exchange code for tokens.
-        struct TokenResp: Decodable {
-            let accessToken: String
-            let refreshToken: String?
-            let expiresIn: Int
-            let nextAction: String?
-            let challengeId: String?
-        }
-        let body: [String: Any] = [
-            "code": code,
-            "code_verifier": stored.verifier,
-            "redirect_uri": configuration.redirectURI.absoluteString,
-            "state": state,
-        ]
-        let httpClient = controller.httpClient
-        let resp = try await httpClient.post(
-            path: "/v1/auth/oauth/callback",
-            body: body,
-            as: TokenResp.self
-        )
-        if resp.nextAction == "verify_mfa" {
-            if let cid = resp.challengeId {
-                await controller.emitEvent(.mfaChallengeRequired(challengeId: cid))
-            }
-            await controller.emit(
-                .error(
-                    SdkError(
-                        code: .mfaStepUpRequired,
-                        reason: .mfaStepUpRequired,
-                        errorMessage: "verify_mfa"
-                    )
-                )
+        guard let clientId = configuration.clientId, !clientId.isEmpty else {
+            throw SdkError(
+                code: .invalidConfig,
+                reason: .notConfigured,
+                errorMessage: "oauth_client_id_missing"
             )
-            return
         }
-        try await controller.completeSignIn(
-            accessToken: resp.accessToken,
-            refreshToken: resp.refreshToken,
-            expiresIn: TimeInterval(resp.expiresIn)
+
+        // RFC 6749 §4.1.3 — form-encoded, at the published token endpoint.
+        let metadata = try await controller.authorizationServerMetadata()
+        let resp = try await controller.httpClient.postForm(
+            url: metadata.tokenEndpoint,
+            fields: [
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": stored.verifier,
+                "redirect_uri": configuration.redirectURI.absoluteString,
+                "client_id": clientId,
+            ],
+            as: APITokenResponse.self
         )
+        // The session is this client's: it refreshes at the token endpoint with this client_id.
+        try await controller.completeSignIn(from: resp, fallbackReason: .codeExchangeFailed, oauthClientId: clientId)
     }
 }

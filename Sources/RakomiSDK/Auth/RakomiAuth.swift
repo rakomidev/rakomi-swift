@@ -73,16 +73,30 @@ public actor RakomiAuth {
         await controller.signInPassword(email: email, password: password)
     }
 
-    public func signUp(email: String, password: String) async {
-        await controller.signUp(email: email, password: password)
+    /// Register an account. `consent` records the person's agreement to the
+    /// tenant's terms; it is required, and deliberately has no default.
+    ///
+    /// Registration does not authenticate: the address has to be verified
+    /// first, so a successful call settles on `signedOut`.
+    public func signUp(email: String, password: String, consent: Bool) async {
+        await controller.signUp(email: email, password: password, consent: consent)
     }
 
     public func signOut() async {
         await controller.signOut()
     }
 
+    /// Browser sign-in with a provider hint. Requires `clientId` on the
+    /// configuration; without one this reports `not_configured` rather than
+    /// opening a browser on a request the server must reject.
     public func signIn(withProvider provider: SocialProvider) async {
         await socialAuth.signIn(provider: provider)
+    }
+
+    /// Browser sign-in with no provider hint — the hosted page offers whatever
+    /// the tenant has configured.
+    public func signInWithBrowser() async {
+        await socialAuth.signIn()
     }
 
     public func verifyMfa(challengeId: String, code: String) async {
@@ -119,7 +133,7 @@ public actor RakomiAuth {
         let result = await adapter.requestBiometric(reason: reason)
         switch result {
         case .success:
-            await controller.hydrate()
+            await controller.hydrateAfterBiometricUnlock()
         case .cancelled:
             await controller.emit(
                 .error(

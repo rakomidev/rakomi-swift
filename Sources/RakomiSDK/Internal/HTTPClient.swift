@@ -42,16 +42,24 @@ actor HTTPClient {
         baseURL: URL,
         publishableKey: String,
         certificateFingerprints: [String]? = nil,
-        userAgent: String = rakomiUserAgent
+        userAgent: String = rakomiUserAgent,
+        session: URLSession? = nil
     ) {
-        self.session = makeRakomiURLSession(
-            certificateFingerprints: certificateFingerprints,
-            additionalHeaders: [
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "X-Rakomi-Publishable-Key": publishableKey,
-            ]
-        )
+        // `session` replaces the pinned session (tests only).
+        if let session {
+            self.session = session
+        } else {
+            self.session = makeRakomiURLSession(
+                certificateFingerprints: certificateFingerprints,
+                additionalHeaders: [
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    // The tenant-scoped publishable key travels as `X-API-Key`, the
+                    // header the API reads and the one the other Rakomi SDKs send.
+                    "X-API-Key": publishableKey,
+                ]
+            )
+        }
         self.baseURL = baseURL
         self.publishableKey = publishableKey
         self.userAgent = userAgent
@@ -74,6 +82,78 @@ actor HTTPClient {
     ) async throws -> T {
         let (data, http) = try await sendRequest(method: "GET", path: path, body: nil, bearer: bearer)
         return try decode(data, status: http.statusCode, as: T.self)
+    }
+
+    /// Form-encoded POST to an ABSOLUTE url.
+    ///
+    /// RFC 6749 §4.1.3 specifies the token request as
+    /// `application/x-www-form-urlencoded`, and the token endpoint is discovered
+    /// rather than derived — it need not sit on `baseURL`'s host — so this takes
+    /// a whole URL and sets its own content type.
+    func postForm<T: Decodable>(
+        url: URL,
+        fields: [String: String],
+        as: T.Type
+    ) async throws -> T {
+        let (data, http) = try await sendForm(url: url, fields: fields)
+        return try decode(data, status: http.statusCode, as: T.self)
+    }
+
+    /// Form-encoded POST to an ABSOLUTE url, returning the raw response for
+    /// callers that classify it themselves (the token-endpoint refresh, RFC 7009
+    /// revocation). `extraHeaders` carries a DPoP proof; its value is never logged.
+    func sendForm(
+        url: URL,
+        fields: [String: String],
+        extraHeaders: [String: String]? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(publishableKey, forHTTPHeaderField: "X-API-Key")
+        if let extraHeaders {
+            for (k, v) in extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        }
+        if let traceparent = TraceContext.current {
+            request.setValue(traceparent, forHTTPHeaderField: "traceparent")
+        }
+        request.httpBody = Data(Self.formEncode(fields).utf8)
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError {
+            throw SdkError(
+                code: .networkError,
+                reason: .network,
+                errorMessage: "url_error_\(urlError.code.rawValue)"
+            )
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw SdkError(code: .networkError, reason: .network, errorMessage: "non_http_response")
+        }
+        return (data, http)
+    }
+
+    /// `application/x-www-form-urlencoded`. Every character outside the RFC 3986
+    /// unreserved set is percent-encoded, space included, which every form
+    /// parser decodes; the `+`-for-space spelling is the other legal one and is
+    /// not used here. Keys are sorted so the body is byte-stable and testable.
+    static func formEncode(_ fields: [String: String]) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return
+            fields
+            .sorted { $0.key < $1.key }
+            .map { key, value in
+                let k = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+                let v = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+                return "\(k)=\(v)"
+            }
+            .joined(separator: "&")
     }
 
     /// Lower-level send returning (data, response) for callers that need
@@ -119,7 +199,22 @@ actor HTTPClient {
         if let traceparent = TraceContext.current {
             request.setValue(traceparent, forHTTPHeaderField: "traceparent")
         }
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError {
+            // Transport failures used to escape as bare `URLError`s. Every caller
+            // catches `SdkError` and falls through to a generic "unknown" branch,
+            // so an unreachable host, a rejected certificate and a timeout all
+            // reported themselves as an unexplained sign-in failure. Map them
+            // once, here, where the underlying code is still available.
+            throw SdkError(
+                code: .networkError,
+                reason: .network,
+                errorMessage: "url_error_\(urlError.code.rawValue)"
+            )
+        }
         guard let http = response as? HTTPURLResponse else {
             throw SdkError(code: .networkError, reason: .network, errorMessage: "non_http_response")
         }
@@ -141,9 +236,14 @@ actor HTTPClient {
         throw Self.mapErrorStatus(status: status, data: data)
     }
 
+    /// `/v1/*` errors are RFC 9457 `application/problem+json`: `code`/`detail` at the top level of
+    /// the body, endpoint-specific extras (e.g. `next_action`) nested under `details`.
     static func mapErrorStatus(status: Int, data: Data) -> SdkError {
         let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        let nextAction = payload?["next_action"] as? String
+        let code = payload?["code"] as? String
+        let detail = payload?["detail"] as? String
+        let details = payload?["details"] as? [String: Any]
+        let nextAction = details?["next_action"] as? String
         if nextAction == "verify_mfa" {
             return SdkError(
                 code: .mfaStepUpRequired,
@@ -159,8 +259,8 @@ actor HTTPClient {
             )
         }
         if status == 403 {
-            let msg = payload?["error"] as? String ?? "forbidden"
-            if msg.contains("mfa") {
+            let msg = detail ?? "forbidden"
+            if (code ?? "").contains("mfa") {
                 return SdkError(
                     code: .mfaStepUpUnavailable,
                     reason: .mfaStepUpUnavailable,
@@ -179,7 +279,16 @@ actor HTTPClient {
                 errorMessage: "server_error_\(status)"
             )
         }
-        return SdkError(code: .signInFailed, reason: .unknown, errorMessage: "http_\(status)")
+        // Everything below carries the server's OWN error code and detail. They
+        // used to be parsed and then dropped for every status but 403, so a
+        // caller looking at a rejected request saw `http_400` and had no way to
+        // learn which field the API refused.
+        let described = [code, detail].compactMap { $0 }.joined(separator: ": ")
+        return SdkError(
+            code: .signInFailed,
+            reason: .unknown,
+            errorMessage: described.isEmpty ? "http_\(status)" : "http_\(status) \(described)"
+        )
     }
 }
 

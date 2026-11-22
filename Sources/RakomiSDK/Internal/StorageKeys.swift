@@ -30,14 +30,42 @@ public enum StorageKeys {
         return "\(storageNamespace).refresh_token.\(tenantId)"
     }
 
-    /// Cached JWKS key: `rakomi.v1.jwks.<tenantId>`.
-    static func jwks(tenantId: String) -> String {
-        return "\(storageNamespace).jwks.\(tenantId)"
+    /// The OAuth client a stored session was issued to, when it was issued to one
+    /// (browser sign-in, authorization code): `rakomi.v1.oauth_client_id.<tenantId>`.
+    /// Such a session refreshes at the token endpoint with that `client_id`; a
+    /// session without it (password, MFA, magic link, native Apple, device code)
+    /// refreshes at `/v1/auth/refresh`. Written and cleared with the refresh token.
+    static func oauthClientId(tenantId: String) -> String {
+        return "\(storageNamespace).oauth_client_id.\(tenantId)"
     }
 
-    /// JWKS ETag key: `rakomi.v1.jwks_etag.<tenantId>`.
-    static func jwksETag(tenantId: String) -> String {
-        return "\(storageNamespace).jwks_etag.\(tenantId)"
+    /// Cached JWKS key: `rakomi.v1.jwks.<tenantId>[.h.<host>]`.
+    ///
+    /// **Per-host scoping**: `host`, when given, is appended as an additional
+    /// segment (`.h.<host>`) on top of the tenant scope. A tenant's issuer host
+    /// can change across the app's lifetime (a custom domain bound after this
+    /// SDK version first shipped, or simply a dev pointed at a different host
+    /// between builds) — a slot keyed by tenant alone would silently reuse a
+    /// PREVIOUS host's persisted document as this instance's "fresh" cache on
+    /// cold start, which offline verification must never do. The host segment
+    /// is not secret (it is the caller's own `jwksURL` configuration), so a
+    /// plain suffix is enough — this only needs to be a stable, DIFFERENT key
+    /// per host, not a cryptographically-opaque one. Mirrors
+    /// `rakomi_flutter`'s `jwksCacheKey` and `@rakomi/react-native`'s
+    /// `resolveJwksKey` (`packages/react-native/src/internal/token-runtime.ts`).
+    static func jwks(tenantId: String, host: String? = nil) -> String {
+        guard let host, !host.isEmpty else {
+            return "\(storageNamespace).jwks.\(tenantId)"
+        }
+        return "\(storageNamespace).jwks.\(tenantId).h.\(host)"
+    }
+
+    /// JWKS ETag key: `rakomi.v1.jwks_etag.<tenantId>[.h.<host>]`.
+    static func jwksETag(tenantId: String, host: String? = nil) -> String {
+        guard let host, !host.isEmpty else {
+            return "\(storageNamespace).jwks_etag.\(tenantId)"
+        }
+        return "\(storageNamespace).jwks_etag.\(tenantId).h.\(host)"
     }
 
     /// OAuth state (single-use, keyed by one-time-id):

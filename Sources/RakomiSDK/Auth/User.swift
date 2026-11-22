@@ -76,7 +76,12 @@ public enum AnyClaim: Sendable, Hashable, Codable {
 public struct User: Sendable, Hashable, Codable {
     public let id: String
     public let email: String?
-    public let emailVerified: Bool
+    /// Whether the address has been verified, or `nil` when the token does not
+    /// say. The platform's access token carries `email_verified` on some paths
+    /// and omits it on others, and an absent claim used to arrive here as
+    /// `false` — so an app showing "not verified" was reporting the SDK's
+    /// default, not the account's state.
+    public let emailVerified: Bool?
     public let displayName: String?
     public let avatarURL: URL?
     /// Raw JWT payload — open-ended forward-compat slot.
@@ -85,7 +90,7 @@ public struct User: Sendable, Hashable, Codable {
     public init(
         id: String,
         email: String? = nil,
-        emailVerified: Bool = false,
+        emailVerified: Bool? = nil,
         displayName: String? = nil,
         avatarURL: URL? = nil,
         claims: [String: AnyClaim] = [:]
