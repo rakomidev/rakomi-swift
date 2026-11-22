@@ -99,6 +99,11 @@ public enum SdkErrorReason: String, Sendable, CaseIterable {
     case dpopProverUnavailable
     case invalidDpopProof
     case invalidRefreshToken
+    // Configuration
+    /// The configuration cannot perform the requested flow — a required value
+    /// was never supplied. Distinct from `invalidCredentials`, which means the
+    /// values were supplied and rejected.
+    case notConfigured
     // Generic
     case network
     case unknown
@@ -132,6 +137,7 @@ public enum SdkErrorReason: String, Sendable, CaseIterable {
         case .dpopProverUnavailable: return "dpop_prover_unavailable"
         case .invalidDpopProof: return "invalid_dpop_proof"
         case .invalidRefreshToken: return "invalid_refresh_token"
+        case .notConfigured: return "not_configured"
         case .network: return "network"
         case .unknown: return "unknown"
         }
@@ -146,17 +152,28 @@ public struct SdkError: Error, Sendable, LocalizedError, Equatable {
     public let reason: SdkErrorReason
     public let errorMessage: String?
     public let providerError: String?
+    /// HTTP status of the response that caused this error, when the server
+    /// answered. Set on refresh failures.
+    public let httpStatus: Int?
+    /// The server's `Retry-After`, in seconds, when it sent one (RFC 9110
+    /// §10.2.3). Set on a transient refresh failure; the SDK does not attempt
+    /// another refresh before it elapses (capped at two minutes).
+    public let retryAfter: TimeInterval?
 
     public init(
         code: SdkErrorCode = .unknown,
         reason: SdkErrorReason,
         errorMessage: String? = nil,
-        providerError: String? = nil
+        providerError: String? = nil,
+        httpStatus: Int? = nil,
+        retryAfter: TimeInterval? = nil
     ) {
         self.code = code
         self.reason = reason
         self.errorMessage = errorMessage
         self.providerError = providerError
+        self.httpStatus = httpStatus
+        self.retryAfter = retryAfter
     }
 
     // MARK: - Redaction
@@ -202,6 +219,8 @@ public struct SdkError: Error, Sendable, LocalizedError, Equatable {
             "reason=\(reason.wire)",
             errorMessage != nil ? "message=\(redactedMessage)" : nil,
             providerError.map { "provider=\(Self.redact($0))" },
+            httpStatus.map { "status=\($0)" },
+            retryAfter.map { "retryAfter=\(Int($0))s" },
         ].compactMap { $0 }
         return "SdkError(\(parts.joined(separator: ", ")))"
     }

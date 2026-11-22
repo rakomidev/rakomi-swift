@@ -30,5 +30,5 @@ struct ContentView: View {
 }
 ```
 
-The view displays the user-facing code + verification URI (`https://rakomi.com/device`)
+The view displays the user-facing code + verification URI (`https://dashboard.rakomi.com/device`)
 and polls the device-token endpoint until the user approves on their phone.

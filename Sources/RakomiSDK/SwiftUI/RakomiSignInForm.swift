@@ -25,7 +25,13 @@ public struct RakomiSignInForm: View {
                 totpSection(challengeId: challengeId)
             } else {
                 credentialsSection
-                socialSection
+                // Rendered only when the configuration can actually start a
+                // browser sign-in. A provider button with no OAuth client behind
+                // it sends the person to an error page, which is worse than not
+                // offering the choice.
+                if env.auth?.configuration.supportsBrowserSignIn == true {
+                    socialSection
+                }
             }
         }
         .accessibilityIdentifier("rakomi.signInForm")

@@ -21,6 +21,13 @@ import Crypto
 import Security
 #endif
 
+#if canImport(CryptoKit)
+/// P-256 ECDSA, from CryptoKit where available (swift-crypto elsewhere).
+typealias P256Signing = CryptoKit.P256.Signing
+#elseif canImport(Crypto)
+typealias P256Signing = Crypto.P256.Signing
+#endif
+
 struct JWTHeader: Sendable, Codable {
     let alg: String?
     let kid: String?
@@ -75,15 +82,11 @@ enum JWTVerifier {
         }
 
         let header = try JSONDecoder().decode(JWTHeader.self, from: headerData)
-        // SECURITY: the verifier is hardcoded to RS256 and is NEVER selected
-        // from the header. `alg` is read solely to reject a token asserting
-        // anything else — none/HS256/HS384/HS512, or no `alg` at all — so the
-        // failure mode is visible rather than silent (RFC 9700 §2.3).
-        // `header.alg` is optional in the decoded model, and a MISSING `alg`
-        // must be rejected exactly like a wrong one — `if let` alone let a
-        // token with no `alg` skip this branch entirely. RFC 9068 requires the
-        // claim to be present. The Flutter port already rejected it.
-        if header.alg != "RS256" {
+        // SECURITY: only RS256, PS256 and ES256 pass; none/HS256/HS384/HS512,
+        // anything unlisted, or no `alg` at all are rejected here, visibly
+        // (RFC 9700 §2.3). The exact algorithm is then bound to the key record:
+        // the header must name the same `alg` the key was published with.
+        guard let headerAlg = header.alg, allowedSigningAlgorithms.contains(headerAlg) else {
             let alg = header.alg ?? "absent"
             throw SdkError(
                 code: .codeExchangeFailed,
@@ -103,17 +106,20 @@ enum JWTVerifier {
         let claims = try Self.decodeClaims(raw)
         let payload = try Self.parsePayload(raw: raw, claims: claims)
 
-        // Verify iss
-        if let iss = payload.iss, iss != expectedIssuer.absoluteString {
-            // Some providers omit trailing slash; do a normalized comparison.
-            let expected = expectedIssuer.absoluteString
-            if iss.trimmingCharacters(in: ["/"]) != expected.trimmingCharacters(in: ["/"]) {
-                throw SdkError(
-                    code: .codeExchangeFailed,
-                    reason: .oauthStateMismatch,
-                    errorMessage: "jwt_iss_mismatch"
-                )
-            }
+        // Verify iss: required, and equal to the expected issuer (a single
+        // trailing slash is the only leniency). A token without `iss` is
+        // rejected — keys are bound to an issuer, so an issuer-less token has
+        // no key set it could legitimately belong to.
+        let expectedIss = expectedIssuer.absoluteString
+        guard let iss = payload.iss,
+            iss == expectedIss
+                || iss.trimmingCharacters(in: ["/"]) == expectedIss.trimmingCharacters(in: ["/"])
+        else {
+            throw SdkError(
+                code: .codeExchangeFailed,
+                reason: .oauthStateMismatch,
+                errorMessage: "jwt_iss_mismatch"
+            )
         }
 
         // Verify aud (scalar OR array; SDK normalizes to array on parse).
@@ -156,7 +162,14 @@ enum JWTVerifier {
         }
         let kid = header.kid
         let key = try jwks.findKey(kid: kid)
-        try Self.verifyRS256(input: inputData, signature: signatureData, key: key)
+        guard key.alg == headerAlg else {
+            throw SdkError(
+                code: .codeExchangeFailed,
+                reason: .invalidCredentials,
+                errorMessage: "jwt_alg_rejected_key_mismatch"
+            )
+        }
+        try Self.verifySignature(alg: headerAlg, input: inputData, signature: signatureData, key: key)
 
         let user = Self.userFromClaims(claims)
         return VerifiedJWT(header: header, payload: payload, user: user)
@@ -191,8 +204,10 @@ enum JWTVerifier {
     static func userFromClaims(_ claims: [String: AnyClaim]) -> User {
         let id = claims["sub"]?.stringValue ?? ""
         let email = claims["email"]?.stringValue
-        let emailVerified: Bool
-        if case .bool(let v) = claims["email_verified"] { emailVerified = v } else { emailVerified = false }
+        // Absent stays absent. Collapsing a missing claim to `false` told every
+        // caller that a verified account was unverified.
+        let emailVerified: Bool?
+        if case .bool(let v) = claims["email_verified"] { emailVerified = v } else { emailVerified = nil }
         let displayName = claims["name"]?.stringValue
         let avatar = claims["picture"]?.stringValue.flatMap { URL(string: $0) }
         return User(
@@ -207,7 +222,47 @@ enum JWTVerifier {
 
     // MARK: - Signature verification
 
-    static func verifyRS256(input: Data, signature: Data, key: JWK) throws {
+    /// Verify `signature` over `input` with `key` using `alg` (already checked
+    /// to equal the key's own `alg`).
+    static func verifySignature(alg: String, input: Data, signature: Data, key: JWK) throws {
+        switch alg {
+        case "RS256": try verifyRSA(input: input, signature: signature, key: key, pss: false)
+        case "PS256": try verifyRSA(input: input, signature: signature, key: key, pss: true)
+        case "ES256": try verifyES256(input: input, signature: signature, key: key)
+        default:
+            throw SdkError(
+                code: .codeExchangeFailed,
+                reason: .invalidCredentials,
+                errorMessage: "jwt_alg_rejected_\(alg)"
+            )
+        }
+    }
+
+    /// ES256: a raw `r || s` JWS signature (RFC 7518 §3.4) over SHA-256.
+    static func verifyES256(input: Data, signature: Data, key: JWK) throws {
+        #if canImport(CryptoKit) || canImport(Crypto)
+        guard let point = key.p256X963Representation(),
+            let publicKey = try? P256Signing.PublicKey(x963Representation: point),
+            let ecdsa = try? P256Signing.ECDSASignature(rawRepresentation: signature),
+            publicKey.isValidSignature(ecdsa, for: input)
+        else {
+            throw SdkError(
+                code: .codeExchangeFailed,
+                reason: .invalidCredentials,
+                errorMessage: "jwt_signature_invalid"
+            )
+        }
+        #else
+        _ = (input, signature, key)
+        throw SdkError(
+            code: .codeExchangeFailed,
+            reason: .invalidCredentials,
+            errorMessage: "jwt_verify_unavailable_on_platform"
+        )
+        #endif
+    }
+
+    static func verifyRSA(input: Data, signature: Data, key: JWK, pss: Bool) throws {
         #if canImport(Security) && (os(iOS) || os(macOS) || os(watchOS) || os(tvOS) || os(visionOS))
         guard let secKey = try key.toSecKey() else {
             throw SdkError(
@@ -219,7 +274,7 @@ enum JWTVerifier {
         var error: Unmanaged<CFError>?
         let valid = SecKeyVerifySignature(
             secKey,
-            .rsaSignatureMessagePKCS1v15SHA256,
+            pss ? .rsaSignatureMessagePSSSHA256 : .rsaSignatureMessagePKCS1v15SHA256,
             input as CFData,
             signature as CFData,
             &error
@@ -236,7 +291,7 @@ enum JWTVerifier {
         let pubKey = try key.toCryptoPublicKey()
         let sig = _RSA.Signing.RSASignature(rawRepresentation: signature)
         let digest = SHA256.hash(data: input)
-        guard pubKey.isValidSignature(sig, for: digest, padding: .insecurePKCS1v1_5) else {
+        guard pubKey.isValidSignature(sig, for: digest, padding: pss ? .PSS : .insecurePKCS1v1_5) else {
             throw SdkError(
                 code: .codeExchangeFailed,
                 reason: .invalidCredentials,

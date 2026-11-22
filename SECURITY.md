@@ -47,11 +47,7 @@ vulnerability affecting our users; and everything the adopted terms list as out 
 
 ## Supported versions
 
-**No version of `RakomiSDK` has been published at the time of writing**, so no support window is
-running and none is stated here. This file applies from the first published version onward. **We do
-not restate a support window we cannot yet date, and nothing here should be read as creating one.**
-
-**While this package is on the `0.x` line, it carries no dated support window at all.** Per
+**While `RakomiSDK` is on the `0.x` line, it carries no dated support window at all.** Per
 **Semantic Versioning 2.0.0 §4**: *"Major version zero (0.y.z) is for initial development. Anything
 MAY change at any time. The public API SHOULD NOT be considered stable."* This is the same posture
 every other Rakomi SDK holds while on its own `0.x` line. A dated support commitment
